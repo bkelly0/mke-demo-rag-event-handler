@@ -1,4 +1,7 @@
 import os
+import logging
+import json
+from google.cloud.logging_v2.handlers import StructuredLogHandler
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
@@ -6,23 +9,27 @@ from typing import Literal
 from google import genai
 from google.cloud import storage, bigquery
 from google.genai import types
-import vertexai
-from vertexai.language_models import TextEmbeddingModel
+from google import genai
+from google.genai import types
 import pypdf
+from dotenv import load_dotenv
 
+load_dotenv()
+PROJECT_ID = os.getenv("PROJECT_ID")
+REGION = os.getenv("REGION", "us-central1")
+BIGQUERY_DATASET = os.environ["BIGQUERY_DATASET"]
+BIGQUERY_TABLE = os.environ["BIGQUERY_TABLE"]
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 app = FastAPI()
-storage_client = storage.Client(project="bkelly-portfolio")
+storage_client = storage.Client(project=PROJECT_ID)
+bq_client = bigquery.Client(project=PROJECT_ID)
 
-vertexai.init(
-    project="bkelly-portfolio",
-    location="us-central1",
-)
-embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-005")
+#embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-005")
 genai_client = genai.Client(
     vertexai=True,
-    project="bkelly-portfolio",
-    location="us-central1",
+    project=PROJECT_ID,
+    location=REGION,
 )
 
 class StorageObjectData(BaseModel):
@@ -50,9 +57,24 @@ class GcpStorageFinalizedEvent(BaseModel):
     datacontenttype: str | None = None
     data: StorageObjectData
 
+def build_logger() -> logging.Logger:
+    logger = logging.getLogger("rag-event-handler")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
-def embed_text_chunks(chunks: list[dict], batch_size: int) -> list[list[float]]:
+    if not logger.handlers:
+        # Structured JSON to stdout; Cloud Run/GCP ingests this automatically.
+        handler = StructuredLogHandler()
+        logger.addHandler(handler)
+
+    return logger
+
+logger = build_logger()
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
+def embed_text_chunks(chunks: list[dict]) -> list[list[float]]:
     all_embeddings = []
+    batch_size = 250; # Vertex AI embedding API supports up to 250 texts per batch request
     
     # Process in batches to stay within API request limits
     for i in range(0, len(chunks), batch_size):
@@ -75,9 +97,7 @@ def embed_text_chunks(chunks: list[dict], batch_size: int) -> list[list[float]]:
 
     return all_embeddings
 
-
-@app.post("/")
-async def root(event: GcpStorageFinalizedEvent):
+def download_file(event: GcpStorageFinalizedEvent) -> str:
     bucket = event.data.bucket
     file_name = event.data.name
 
@@ -90,7 +110,9 @@ async def root(event: GcpStorageFinalizedEvent):
     local_path = f"./tmp/{os.path.basename(file_name)}"
     bucket = storage_client.bucket(bucket)
     bucket.blob(file_name).download_to_filename(local_path)
+    return local_path
 
+def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
     reader = pypdf.PdfReader(local_path)
     chunks = []
     for i, page in enumerate(reader.pages):
@@ -98,17 +120,57 @@ async def root(event: GcpStorageFinalizedEvent):
         if text and text.strip():
             chunks.append({"page": i + 1, "text": text.strip()})
 
+    embeddings = embed_text_chunks(chunks)
+    return chunks, embeddings
+
+def insert_into_bigquery(
+    chunks: list[dict[str, str | int]],
+    embeddings: list[list[float]],
+    doc_id: str,
+    source_type: str,
+) -> None: 
+        rows = []
+        for index, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+            rows.append(
+                {
+                    "chunk_id": doc_id + "_" + str(index),
+                    "doc_id": doc_id,
+                    "source_type": source_type,
+                    "content": str(chunk["text"]),   
+                    "metadata": json.dumps({"page": chunk["page"]}),
+                    "embedding": vector
+                }
+            )
+        
+        table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.{BIGQUERY_TABLE}"
+        errors = bq_client.insert_rows_json(table, rows)
+
+        if errors:
+            logger.error(str(errors))
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Failed to insert rows into BigQuery",
+                    "errors": errors,
+                },
+            )
+
+@app.post("/")
+async def root(event: GcpStorageFinalizedEvent):
+    try:
+        local_file_path = download_file(event);
+        chunks, embeddings = process_pdf_file(local_file_path);
         if not chunks:
-            return {
-                "message" : "No text found."
-            }
-
-    for i, chunk in enumerate(chunks):
-        print("-------\n")
-        print("test: " + str(chunk) + "\n")
-
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Chunks not found",
+                    "errors": [],
+                },
+            )
+        insert_into_bigquery(chunks, embeddings, event.data.name, "pdf")
+    finally:
+        os.remove(local_file_path)
     return {
-        "message": "Downloaded file",
+        "message": "File Processed",
     }
-    
-#https://storage.googleapis.com/bkelly-mke-rag-data/CH295-sub1.pdf
