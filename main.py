@@ -4,7 +4,7 @@ import json
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from google.cloud.logging_v2.handlers import StructuredLogHandler
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from datetime import datetime
 from google import genai
@@ -48,9 +48,6 @@ class StorageObjectData(BaseModel):
     updated: datetime | None = None
 
 
-class GcpStorageFinalizedEvent(BaseModel):
-    data: StorageObjectData
-
 def build_logger() -> logging.Logger:
     logger = logging.getLogger("rag-event-handler")
     logger.setLevel(logging.INFO)
@@ -91,9 +88,9 @@ def embed_text_chunks(chunks: list[dict]) -> list[list[float]]:
 
     return all_embeddings
 
-def download_file(event: GcpStorageFinalizedEvent) -> str:
-    bucket = event.data.bucket
-    file_name = event.data.name
+def download_file(object_data: object_data) -> str:
+    bucket = object_data.bucket
+    file_name = object_data.name
 
     if not file_name or not file_name.endswith(".pdf"):
         raise HTTPException(
@@ -150,7 +147,7 @@ def insert_into_bigquery(
             )
 
 @app.post("/")
-async def root(event: GcpStorageFinalizedEvent, ce_type: str = Header(..., alias="ce-type")):
+async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias="ce-type")):
     if ce_type != "google.cloud.storage.object.v1.finalized":
         logger.error("Unsupported event type")
         raise HTTPException(
@@ -162,7 +159,7 @@ async def root(event: GcpStorageFinalizedEvent, ce_type: str = Header(..., alias
         )
 
     try:
-        local_file_path = download_file(event);
+        local_file_path = download_file(object_data);
         chunks, embeddings = process_pdf_file(local_file_path);
         if not chunks:
             raise HTTPException(
@@ -172,7 +169,7 @@ async def root(event: GcpStorageFinalizedEvent, ce_type: str = Header(..., alias
                     "errors": [],
                 },
             )
-        insert_into_bigquery(chunks, embeddings, event.data.name, "pdf")
+        insert_into_bigquery(chunks, embeddings, object_data.name, "pdf")
     finally:
         os.remove(local_file_path)
     return {
