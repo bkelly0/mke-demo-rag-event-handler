@@ -88,7 +88,7 @@ def embed_text_chunks(chunks: list[dict]) -> list[list[float]]:
 
     return all_embeddings
 
-def download_file(object_data: object_data) -> str:
+def download_file(object_data: StorageObjectData) -> str:
     bucket = object_data.bucket
     file_name = object_data.name
 
@@ -171,7 +171,8 @@ async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias=
             )
         insert_into_bigquery(chunks, embeddings, object_data.name, "pdf")
     finally:
-        os.remove(local_file_path)
+        if local_file_path and os.path.exists(local_file_path):
+            os.remove(local_file_path)
     return {
         "message": "File Processed",
     }
