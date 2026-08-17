@@ -1,8 +1,10 @@
 import os
 import logging
 import json
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from google.cloud.logging_v2.handlers import StructuredLogHandler
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Literal
@@ -25,7 +27,6 @@ app = FastAPI()
 storage_client = storage.Client(project=PROJECT_ID)
 bq_client = bigquery.Client(project=PROJECT_ID)
 
-#embedding_model = TextEmbeddingModel.from_pretrained("text-embedding-005")
 genai_client = genai.Client(
     vertexai=True,
     project=PROJECT_ID,
@@ -174,3 +175,14 @@ async def root(event: GcpStorageFinalizedEvent):
     return {
         "message": "File Processed",
     }
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning(f"422 Validation Error: {exc.errors()}")
+    logger.info(f"Received Body: {await request.body()}")
+    
+    # Return standard FastAPI structure to the client
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()},
+    )
