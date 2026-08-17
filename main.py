@@ -4,10 +4,9 @@ import json
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from google.cloud.logging_v2.handlers import StructuredLogHandler
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Literal
 from google import genai
 from google.cloud import storage, bigquery
 from google.genai import types
@@ -33,6 +32,7 @@ genai_client = genai.Client(
     location=REGION,
 )
 
+#request objects for binary mode where metadata is provided in the headers
 class StorageObjectData(BaseModel):
     bucket: str
     name: str
@@ -49,13 +49,6 @@ class StorageObjectData(BaseModel):
 
 
 class GcpStorageFinalizedEvent(BaseModel):
-    specversion: Literal["1.0"]
-    id: str
-    source: str
-    type: Literal["google.cloud.storage.object.v1.finalized"]
-    subject: str | None = None
-    time: datetime
-    datacontenttype: str | None = None
     data: StorageObjectData
 
 def build_logger() -> logging.Logger:
@@ -157,7 +150,17 @@ def insert_into_bigquery(
             )
 
 @app.post("/")
-async def root(event: GcpStorageFinalizedEvent):
+async def root(event: GcpStorageFinalizedEvent, ce_type: str = Header(..., alias="ce-type")):
+    if ce_type != "google.cloud.storage.object.v1.finalized":
+        logger.error("Unsupported event type")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"Unsupported event type {ce_type}",
+                "errors": [],
+            },
+        )
+
     try:
         local_file_path = download_file(event);
         chunks, embeddings = process_pdf_file(local_file_path);
@@ -181,8 +184,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.warning(f"422 Validation Error: {exc.errors()}")
     logger.info(f"Received Body: {await request.body()}")
     
-    # Return standard FastAPI structure to the client
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=422,
         content={"detail": exc.errors()},
     )
