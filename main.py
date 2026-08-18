@@ -22,6 +22,8 @@ REGION = os.getenv("REGION", "us-central1")
 BIGQUERY_DATASET = os.environ["BIGQUERY_DATASET"]
 BIGQUERY_TABLE = os.environ["BIGQUERY_TABLE"]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+CHUNK_SIZE = os.getenv("CHUNK_SIZE", 4000)
+BATCH_SIZE = os.getenv("BATCH_SIZE", 15)
 
 app = FastAPI()
 storage_client = storage.Client(project=PROJECT_ID)
@@ -66,11 +68,10 @@ logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 def embed_text_chunks(chunks: list[dict]) -> list[list[float]]:
     all_embeddings = []
-    batch_size = 250; # Vertex AI embedding API supports up to 250 texts per batch request
     
     # Process in batches to stay within API request limits
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i : i + batch_size]
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch = chunks[i : i + BATCH_SIZE]
         texts = [c["text"] for c in batch]
 
         response = genai_client.models.embed_content(
@@ -119,10 +120,19 @@ def download_file(object_data: StorageObjectData) -> str:
 def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
     reader = pypdf.PdfReader(local_path)
     chunks = []
-    for i, page in enumerate(reader.pages):
+    for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text()
-        if text and text.strip():
-            chunks.append({"page": i + 1, "text": text.strip()})
+
+        if not text:
+            continue
+
+        text = text.strip()
+
+        for start in range(0, len(text), CHUNK_SIZE):
+            chunks.append({
+                "page": page_number,
+                "text": text[start:start + CHUNK_SIZE],
+            })
 
     embeddings = embed_text_chunks(chunks)
     return chunks, embeddings
