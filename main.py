@@ -12,6 +12,7 @@ from google.cloud import storage, bigquery
 from google.genai import types
 from google import genai
 from google.genai import types
+from google.api_core.exceptions import Forbidden, GoogleAPICallError, NotFound
 import pypdf
 from dotenv import load_dotenv
 
@@ -99,9 +100,21 @@ def download_file(object_data: StorageObjectData) -> str:
         )
 
     local_path = f"./tmp/{os.path.basename(file_name)}"
-    bucket = storage_client.bucket(bucket)
-    bucket.blob(file_name).download_to_filename(local_path)
-    return local_path
+    try:
+        os.makedirs("./tmp", exist_ok=True)
+        bucket = storage_client.bucket(object_data.bucket)
+        bucket.blob(file_name).download_to_filename(local_path)
+        return local_path
+    except NotFound as ex:
+        raise HTTPException(404, "The requested PDF was not found.") from ex
+    except Forbidden as ex:
+        raise HTTPException(403, "Permission denied when downloading the PDF.") from ex
+    except GoogleAPICallError as ex:
+        logger.exception("Google Cloud Storage download failed")
+        raise HTTPException(502, "Cloud Storage download failed.") from ex
+    except OSError as ex:
+        logger.exception("Local file operation failed")
+        raise HTTPException(500, "Unable to save the downloaded PDF.") from ex
 
 def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
     reader = pypdf.PdfReader(local_path)
@@ -158,6 +171,7 @@ async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias=
             },
         )
 
+    local_file_path = None
     try:
         local_file_path = download_file(object_data);
         chunks, embeddings = process_pdf_file(local_file_path);
