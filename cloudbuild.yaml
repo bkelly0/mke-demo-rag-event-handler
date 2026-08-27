@@ -1,0 +1,57 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: Build image
+    args:
+      - build
+      - -f
+      - Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    id: Push image
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Deploy to Cloud Run
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE_NAME}
+      - --image
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --ingress
+      - internal
+      - --allow-unauthenticated
+      - --service-account
+      - ${_SERVICE_ACCOUNT}
+      - --min-instances=0
+      - --max-instances=1
+      - --port
+      - "8080"
+      - --set-env-vars
+      - "PROJECT_ID=$PROJECT_ID,REGION=$_REGION,BIGQUERY_DATASET=$_BIGQUERY_DATASET,BIGQUERY_TABLE=$_BIGQUERY_TABLE,LOG_LEVEL=$_LOG_LEVEL"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: app-images
+  _IMAGE_NAME: mke-demo-rag-event-handler
+  _SERVICE_NAME: mke-demo-rag-event-handler
+  _SERVICE_ACCOUNT:
+  _BIGQUERY_DATASET:
+  _BIGQUERY_TABLE:
+  _LOG_LEVEL: INFO
