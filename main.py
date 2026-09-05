@@ -23,7 +23,6 @@ PROJECT_ID = os.getenv("PROJECT_ID")
 REGION = os.getenv("REGION", "us-central1")
 BIGQUERY_DATASET = os.environ["BIGQUERY_DATASET"]
 BIGQUERY_TABLE = os.environ["BIGQUERY_TABLE"]
-BIGQUERY_COST_LOG_TABLE = os.environ["BIGQUERY_COST_LOG_TABLE"]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
@@ -191,7 +190,7 @@ def process_pdf_file(local_path: str, doc_name: str) -> tuple[list[dict[str, str
 
     embeddings, estimated_costs = embed_text_chunks(chunks)
     total_cost = log_costs(estimated_costs, local_path)
-    write_cost_log_to_bigquery(doc_name, total_cost)
+    write_document_log_to_bigquery(doc_name, total_cost)
     
     return chunks, embeddings
 
@@ -287,7 +286,7 @@ def log_costs(estimated_costs, file) -> float:
     return total_cost
 
 
-def write_cost_log_to_bigquery(name: str, estimated_cost: float) -> None:
+def write_document_log_to_bigquery(name: str, estimated_cost: float) -> None:
     logger.info("writing cost log...")
     row = {
         "name": name,
@@ -295,7 +294,7 @@ def write_cost_log_to_bigquery(name: str, estimated_cost: float) -> None:
         "dry_run": DRY_RUN,
     }
 
-    table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.{BIGQUERY_COST_LOG_TABLE}"
+    table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.documents"
     errors = bq_client.insert_rows_json(table, [row])
 
     if errors:
