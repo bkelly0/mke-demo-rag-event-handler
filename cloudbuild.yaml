@@ -7,13 +7,16 @@ steps:
       - Dockerfile
       - -t
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
       - .
 
   - name: gcr.io/cloud-builders/docker
     id: Push image
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Deploy to Cloud Run
@@ -38,10 +41,11 @@ steps:
       - --port
       - "8080"
       - --set-env-vars
-      - "PROJECT_ID=$PROJECT_ID,REGION=$_REGION,BIGQUERY_DATASET=$_BIGQUERY_DATASET,BIGQUERY_TABLE=$_BIGQUERY_TABLE,LOG_LEVEL=$_LOG_LEVEL"
+      - "PROJECT_ID=$PROJECT_ID,REGION=$_REGION,BIGQUERY_DATASET=$_BIGQUERY_DATASET,BIGQUERY_TABLE=$_BIGQUERY_TABLE,LOG_LEVEL=$_LOG_LEVEL,DRY_RUN=$_DRY_RUN"
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -49,9 +53,10 @@ options:
 substitutions:
   _REGION: us-central1
   _AR_REPO: app-images
-  _IMAGE_NAME: mke-demo-rag-event-handler
-  _SERVICE_NAME: mke-demo-rag-event-handler
+  _IMAGE_NAME: mke-rag-pdf-handler
+  _SERVICE_NAME: mke-rag-pdf-handler
   _SERVICE_ACCOUNT:
   _BIGQUERY_DATASET:
   _BIGQUERY_TABLE:
   _LOG_LEVEL: INFO
+  _DRY_RUN: "true"

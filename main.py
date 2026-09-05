@@ -8,12 +8,15 @@ from google.cloud.logging_v2.handlers import StructuredLogHandler
 from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from datetime import datetime
-from google import genai
 from google.cloud import storage, bigquery
-from google.genai import types
 from google.api_core.exceptions import Forbidden, GoogleAPICallError, NotFound
+import vertexai
+from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 import pypdf
 from dotenv import load_dotenv
+
+COST_PER_1M_TOKENS = 0.10
+MODEL = "text-embedding-005"
 
 load_dotenv()
 PROJECT_ID = os.getenv("PROJECT_ID")
@@ -23,16 +26,14 @@ BIGQUERY_TABLE = os.environ["BIGQUERY_TABLE"]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("true", "1") # if true, do not call model or insert into BigQuery
 
 app = FastAPI()
 storage_client = storage.Client(project=PROJECT_ID)
 bq_client = bigquery.Client(project=PROJECT_ID)
 
-genai_client = genai.Client(
-    vertexai=True,
-    project=PROJECT_ID,
-    location=REGION,
-)
+vertexai.init(project=PROJECT_ID, location=REGION)
+embedding_model = TextEmbeddingModel.from_pretrained(MODEL)
 
 #request objects for binary mode where metadata is provided in the headers
 class StorageObjectData(BaseModel):
@@ -65,29 +66,38 @@ def build_logger() -> logging.Logger:
 logger = build_logger()
 logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
+if DRY_RUN:
+    logger.warning("RUNNING IN DRY_RUN MODE. No requests will be sent to the model and data is not persisted.")
+
 def embed_text_chunks(chunks: list[dict]) -> list[list[float]]:
     all_embeddings = []
+    all_estimated_costs = []
     
     # Process in batches to stay within API request limits
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
         texts = [c["text"] for c in batch]
 
-        response = genai_client.models.embed_content(
-            model="text-embedding-005",
-            contents=texts,
-            # Task type helps optimize vector clustering for semantic retrieval
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT",
-                title="PDF Document Chunks"
-            )
-        )
-        
-        # Extract vector lists
-        for embedding in response.embeddings:
-            all_embeddings.append(embedding.values)
+        all_estimated_costs.append(estimate_embedding_cost(texts))
 
-    return all_embeddings
+        if not DRY_RUN:
+            logger.info("requesting embeddings...")
+            response = embedding_model.get_embeddings(
+                [
+                    TextEmbeddingInput(
+                        text=text,
+                        task_type="RETRIEVAL_DOCUMENT",
+                        title="PDF Document Chunks",
+                    )
+                    for text in texts
+                ]
+            )
+            
+            # Extract vector lists
+            for embedding in response:
+                all_embeddings.append(embedding.values)
+
+    return all_embeddings, all_estimated_costs
 
 def download_file(object_data: StorageObjectData) -> str:
     bucket = object_data.bucket
@@ -178,8 +188,11 @@ def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[
                 "text": chunk_text,
             })
 
-    embeddings = embed_text_chunks(chunks)
+    embeddings, estimated_costs = embed_text_chunks(chunks)
+    log_costs(estimated_costs, local_path)
+    
     return chunks, embeddings
+
 
 def insert_into_bigquery(
     chunks: list[dict[str, str | int]],
@@ -187,6 +200,7 @@ def insert_into_bigquery(
     doc_id: str,
     source_type: str,
 ) -> None: 
+        logger.info("inserting data...")
         rows = []
         for index, (chunk, vector) in enumerate(zip(chunks, embeddings)):
             rows.append(
@@ -237,13 +251,36 @@ async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias=
                     "errors": [],
                 },
             )
-        insert_into_bigquery(chunks, embeddings, object_data.name, "pdf")
+        if not DRY_RUN:
+            insert_into_bigquery(chunks, embeddings, object_data.name, "pdf")
     finally:
         if local_file_path and os.path.exists(local_file_path):
             os.remove(local_file_path)
     return {
         "message": "File Processed",
     }
+
+def estimate_embedding_cost(texts: list[str]) -> dict:
+    # Avoid a separate API call; four characters is a reasonable rough token estimate.
+    total_tokens = sum(max(1, (len(text) + 3) // 4) for text in texts)
+
+    estimated_cost = (total_tokens / 1_000_000) * COST_PER_1M_TOKENS
+
+    return {
+        "item_count": len(texts),
+        "total_tokens": total_tokens,
+        "estimated_cost": f"${estimated_cost:.8f}"
+    }
+
+def log_costs(estimated_costs, file) -> None:
+    num_requests = len(estimated_costs)
+    total_cost = 0.0
+    total_tokens = 0
+    for estimate in estimated_costs:
+        total_cost += float(estimate["estimated_cost"].removeprefix("$"))
+        total_tokens += estimate["total_tokens"]
+
+    logger.info(f"Estimation: {total_tokens} tokens across {num_requests} requests for file {file}, ${total_cost:.8f}")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
