@@ -61,5 +61,5 @@ substitutions:
   _BIGQUERY_TABLE:
   _LOG_LEVEL: INFO
   _DRY_RUN: "true"
-  _CONCURRENCY: 10
-  _MAX_INSTANCES: 2
+  _CONCURRENCY: "10"
+  _MAX_INSTANCES: "2"
