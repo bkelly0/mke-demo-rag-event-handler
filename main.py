@@ -290,7 +290,8 @@ def write_document_log_to_bigquery(name: str, estimated_cost: float) -> None:
     logger.info("writing cost log...")
     row = {
         "name": name,
-        "estimated_cost": estimated_cost,
+        # BigQuery NUMERIC supports at most 9 decimal digits of scale.
+        "estimated_cost": round(estimated_cost, 9),
         "dry_run": DRY_RUN,
     }
 
