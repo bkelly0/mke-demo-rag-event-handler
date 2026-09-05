@@ -173,7 +173,7 @@ def chunk_text_by_paragraphs(text: str, chunk_size: int = CHUNK_SIZE) -> list[st
     return refined_chunks
 
 
-def process_pdf_file(local_path: str, doc_name: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
+def process_pdf_file(local_path: str, doc_name: str, event_id: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
     reader = pypdf.PdfReader(local_path)
     chunks = []
     for page_number, page in enumerate(reader.pages, start=1):
@@ -190,7 +190,7 @@ def process_pdf_file(local_path: str, doc_name: str) -> tuple[list[dict[str, str
 
     embeddings, estimated_costs = embed_text_chunks(chunks)
     total_cost = log_costs(estimated_costs, local_path)
-    write_document_log_to_bigquery(doc_name, total_cost)
+    write_document_log_to_bigquery(doc_name, total_cost, event_id)
     
     return chunks, embeddings
 
@@ -229,7 +229,11 @@ def insert_into_bigquery(
             )
 
 @app.post("/")
-async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias="ce-type")):
+async def root(
+    object_data: StorageObjectData,
+    ce_type: str = Header(..., alias="ce-type"),
+    ce_id: str = Header(..., alias="ce-id"),
+):
     if ce_type != "google.cloud.storage.object.v1.finalized":
         logger.error("Unsupported event type")
         raise HTTPException(
@@ -243,7 +247,7 @@ async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias=
     local_file_path = None
     try:
         local_file_path = download_file(object_data);
-        chunks, embeddings = process_pdf_file(local_file_path, object_data.name);
+        chunks, embeddings = process_pdf_file(local_file_path, object_data.name, ce_id);
         if not chunks:
             raise HTTPException(
                 status_code=400,
@@ -286,13 +290,14 @@ def log_costs(estimated_costs, file) -> float:
     return total_cost
 
 
-def write_document_log_to_bigquery(name: str, estimated_cost: float) -> None:
+def write_document_log_to_bigquery(name: str, estimated_cost: float, event_id: str) -> None:
     logger.info("writing cost log...")
     row = {
         "name": name,
         # BigQuery NUMERIC supports at most 9 decimal digits of scale.
         "estimated_cost": round(estimated_cost, 9),
         "dry_run": DRY_RUN,
+        "event_id": event_id,
     }
 
     table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.documents"
