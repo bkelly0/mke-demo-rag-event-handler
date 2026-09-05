@@ -244,6 +244,10 @@ async def root(
             },
         )
 
+    if document_event_exists(ce_id):
+        logger.info("Event already processed", extra={"event_id": ce_id})
+        return {"message": "File Already Processed"}
+
     local_file_path = None
     try:
         local_file_path = download_file(object_data);
@@ -264,6 +268,25 @@ async def root(
     return {
         "message": "File Processed",
     }
+
+
+def document_event_exists(event_id: str) -> bool:
+    table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.documents"
+    query = f"""
+        SELECT 1
+        FROM `{table}`
+        WHERE event_id = @event_id
+        LIMIT 1
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("event_id", "STRING", event_id)]
+    )
+
+    try:
+        return next(iter(bq_client.query(query, job_config=job_config)), None) is not None
+    except GoogleAPICallError as ex:
+        logger.exception("BigQuery event lookup failed")
+        raise HTTPException(502, "BigQuery event lookup failed.") from ex
 
 def estimate_embedding_cost(texts: list[str]) -> dict:
     # Avoid a separate API call; four characters is a reasonable rough token estimate.

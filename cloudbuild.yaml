@@ -37,7 +37,8 @@ steps:
       - --service-account
       - ${_SERVICE_ACCOUNT}
       - --min-instances=0
-      - --max-instances=1
+      - --max-instances=${_MAX_INSTANCES}
+      - --concurrency=${_CONCURRENCY}
       - --port
       - "8080"
       - --set-env-vars
@@ -60,3 +61,5 @@ substitutions:
   _BIGQUERY_TABLE:
   _LOG_LEVEL: INFO
   _DRY_RUN: "true"
+  _CONCURRENCY=10
+  _MAX_INSTANCES=2
