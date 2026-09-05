@@ -23,6 +23,7 @@ PROJECT_ID = os.getenv("PROJECT_ID")
 REGION = os.getenv("REGION", "us-central1")
 BIGQUERY_DATASET = os.environ["BIGQUERY_DATASET"]
 BIGQUERY_TABLE = os.environ["BIGQUERY_TABLE"]
+BIGQUERY_COST_LOG_TABLE = os.environ["BIGQUERY_COST_LOG_TABLE"]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
@@ -173,7 +174,7 @@ def chunk_text_by_paragraphs(text: str, chunk_size: int = CHUNK_SIZE) -> list[st
     return refined_chunks
 
 
-def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
+def process_pdf_file(local_path: str, doc_name: str) -> tuple[list[dict[str, str | int]], list[list[float]]]:
     reader = pypdf.PdfReader(local_path)
     chunks = []
     for page_number, page in enumerate(reader.pages, start=1):
@@ -189,7 +190,8 @@ def process_pdf_file(local_path: str) -> tuple[list[dict[str, str | int]], list[
             })
 
     embeddings, estimated_costs = embed_text_chunks(chunks)
-    log_costs(estimated_costs, local_path)
+    total_cost = log_costs(estimated_costs, local_path)
+    write_cost_log_to_bigquery(doc_name, total_cost)
     
     return chunks, embeddings
 
@@ -242,7 +244,7 @@ async def root(object_data: StorageObjectData, ce_type: str = Header(..., alias=
     local_file_path = None
     try:
         local_file_path = download_file(object_data);
-        chunks, embeddings = process_pdf_file(local_file_path);
+        chunks, embeddings = process_pdf_file(local_file_path, object_data.name);
         if not chunks:
             raise HTTPException(
                 status_code=400,
@@ -272,7 +274,7 @@ def estimate_embedding_cost(texts: list[str]) -> dict:
         "estimated_cost": f"${estimated_cost:.8f}"
     }
 
-def log_costs(estimated_costs, file) -> None:
+def log_costs(estimated_costs, file) -> float:
     num_requests = len(estimated_costs)
     total_cost = 0.0
     total_tokens = 0
@@ -281,6 +283,30 @@ def log_costs(estimated_costs, file) -> None:
         total_tokens += estimate["total_tokens"]
 
     logger.info(f"Estimation: {total_tokens} tokens across {num_requests} requests for file {file}, ${total_cost:.8f}")
+
+    return total_cost
+
+
+def write_cost_log_to_bigquery(name: str, estimated_cost: float) -> None:
+    logger.info("writing cost log...")
+    row = {
+        "name": name,
+        "estimated_cost": estimated_cost,
+        "dry_run": DRY_RUN,
+    }
+
+    table = f"{PROJECT_ID}.{BIGQUERY_DATASET}.{BIGQUERY_COST_LOG_TABLE}"
+    errors = bq_client.insert_rows_json(table, [row])
+
+    if errors:
+        logger.error(str(errors))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to insert cost log row into BigQuery",
+                "errors": errors,
+            },
+        )
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
